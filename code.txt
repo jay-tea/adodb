@@ -1,0 +1,180 @@
+Public Sub refreshItems()
+
+Set pCon = New ADODB.Connection
+pCon.ConnectionString = "Provider=PervasiveOLEDB;Mode=ReadWrite;Data Source=Company18;User ID=Crystal;Password=;Location=MYPC"
+pCon.Open
+
+Dim itemList As Scripting.Dictionary
+Dim IDList As Scripting.Dictionary
+Dim itemRec As ADODB.Recordset
+Dim quotRec As ADODB.Recordset
+Dim rc As ADODB.Recordset
+Dim quotList As Scripting.Dictionary
+Dim tempItem As Scripting.Dictionary
+Dim tempAss As Scripting.Dictionary
+Dim tempEntry As Scripting.Dictionary
+
+Set itemRec = New ADODB.Recordset
+Set itemList = New Scripting.Dictionary
+Set IDList = New Scripting.Dictionary
+
+itemRec.Open Source:="Select " & lineitem & " FROM LINEITEM", ActiveConnection:=pCon, LockType:=adLockReadOnly, CursorType:=adOpenForwardOnly
+
+Do While itemRec.EOF = False
+    itemID = itemRec.Fields("ItemID").Value
+    itemNum = itemRec.Fields("ItemRecordNumber").Value
+    IDList(itemID) = itemNum
+    Set tempItem = New Scripting.Dictionary
+    
+    tempItem("__id") = itemID
+    tempItem("__price") = itemRec.Fields("PriceLevel1Amount").Value
+
+    i = i + 1
+    itemRec.MoveNext
+    
+    Set itemList(itemNum) = tempItem
+    Set tempItem = Nothing
+Loop
+
+Set itemRec = Nothing
+
+Const worktkt As String = "ItemRecordNumber,Date,Number,QtyToBuild,AssemblyRevNo"
+Set workRec = New ADODB.Recordset
+
+workRec.Open Source:="Select " & worktkt & " FROM WORKTKT WHERE Closed=0", ActiveConnection:=pCon, LockType:=adLockReadOnly, CursorType:=adOpenForwardOnly
+
+Do While workRec.EOF = False
+    
+    If itemList.Exists(workRec.Fields("ItemRecordNumber").Value) Then
+    
+        revNo = workRec.Fields("AssemblyRevNo").Value
+        Set tempItem = itemList(workRec.Fields("ItemRecordNumber").Value)
+    
+        Set tempAss = New Scripting.Dictionary
+
+        tempAss("qty") = workRec.Fields("QtyToBuild").Value
+        tempItem("__stock") = tempItem("__stock") + workRec.Fields("QtyToBuild").Value
+            
+        Set tempItem("__ass" & revNo) = tempAss
+        Set itemList(workRec.Fields("ItemRecordNumber").Value) = tempItem
+        
+        Set tempAss = Nothing
+        Set tempItem = Nothing
+        
+    End If
+    
+    workRec.MoveNext
+    
+Loop
+Set workRec = Nothing
+
+Set quotRec = New ADODB.Recordset
+Set quotList = New Scripting.Dictionary
+
+quotRec.Open Source:="Select Reference,IsDropShip,PostOrder FROM JRNLHDR Where (JrnlKey_Journal='10' OR ProposalAccepted='1') AND POSOisClosed='0'", ActiveConnection:=pCon, LockType:=adLockReadOnly, CursorType:=adOpenForwardOnly
+
+Do While quotRec.EOF = False
+    
+    If quotRec.Fields("IsDropShip").Value = 1 Then
+        quotList(quotRec.Fields("PostOrder").Value) = 3
+    Else
+        quotList(quotRec.Fields("PostOrder").Value) = 1
+    End If
+    
+    quotRec.MoveNext
+    
+Loop
+Set quoteRec = Nothing
+
+Set rc = New ADODB.Recordset
+            
+rc.Open Source:="Select " & jrnlrow & " FROM JRNLROW Where ItemRecordNumber>0 AND RowType=0 AND (Journal=8 OR RowNumber>0)", ActiveConnection:=pCon, LockType:=adLockReadOnly, CursorType:=adOpenForwardOnly
+      
+Do While rc.EOF = False
+    If itemList.Exists(rc.Fields("ItemRecordNumber").Value) Then
+
+    Set tempItem = itemList(rc.Fields("ItemRecordNumber").Value)
+    journ = rc.Fields("Journal").Value
+    mult = 1
+
+    Select Case journ
+        Case 1
+            tempItem("__stock") = tempItem("__stock") - rc.Fields("StockingQuantity").Value
+        Case 4
+            tempItem("__stock") = tempItem("__stock") + rc.Fields("StockingQuantity").Value
+        Case 8
+            If rc.Fields("RowNumber").Value > 0 Then
+                mult = -1
+            End If
+            tempItem("__stock") = tempItem("__stock") + mult * rc.Fields("StockingQuantity").Value
+        Case 7
+            tempItem("__stock") = tempItem("__stock") + rc.Fields("StockingQuantity").Value
+        Case 3
+            tempItem("__stock") = tempItem("__stock") - rc.Fields("StockingQuantity").Value
+        Case 2
+            tempItem("__stock") = tempItem("__stock") + rc.Fields("StockingQuantity").Value
+        Case 11
+            If rc.Fields("QtyOrdered").Value <> rc.Fields("QtyReceived").Value Then
+                quotProp = quotList(rc.Fields("PostOrder").Value)
+                If quotProp > 0 Then
+                    If rc.Fields("QtyOrdered").Value = 0# Then
+                        qty = 0
+                    Else
+                        qty = -1 * rc.Fields("StockingQtyOrdered").Value * (rc.Fields("QtyOrdered").Value - rc.Fields("QtyReceived").Value) / rc.Fields("QtyOrdered").Value
+                    End If
+                    tempItem("__stockChg") = tempItem("__stockChg") + qty
+                End If
+            End If
+        Case 10
+            If rc.Fields("QtyOrdered").Value <> rc.Fields("QtyReceived").Value Then
+                If quotList(rc.Fields("PostOrder").Value) > 0 Then
+                    tempValue = rc.Fields("StockingQtyOrdered").Value * (rc.Fields("QtyOrdered").Value - rc.Fields("QtyReceived").Value) / rc.Fields("QtyOrdered").Value
+                    tempItem("__stock") = tempItem("__stock") + mult * tempValue
+                End If
+            End If
+    End Select
+
+    Set itemList(rc.Fields("ItemRecordNumber").Value) = tempItem
+    Set tempItem = Nothing
+
+    End If
+
+    rc.MoveNext
+Loop
+
+Const bomitems As String = "AssemblyRecordNo,ComponentRecordNo,QtyRequired,RevisionNumber"
+Set rc = New ADODB.Recordset
+
+rc.Open Source:="Select " & bomitems & " FROM BOMITEMS", ActiveConnection:=pCon, LockType:=adLockReadOnly, CursorType:=adOpenForwardOnly
+
+Do While rc.EOF = False
+
+    revNo = rc.Fields("RevisionNumber").Value
+
+    If itemList(rc.Fields("AssemblyRecordNo").Value).Exists("__ass" & revNo) Then
+    
+        Set tempItem = itemList(rc.Fields("ComponentRecordNo").Value)
+        Set tempAss = itemList(rc.Fields("AssemblyRecordNo").Value)("__ass" & revNo)
+        tempAss(rc.Fields("ComponentRecordNo").Value) = tempAss(rc.Fields("ComponentRecordNo").Value) + 1
+        qty = tempAss("qty") * rc.Fields("QtyRequired").Value
+        tempItem("__stock") = tempItem("__stock") - qty
+        
+    End If
+
+    rc.MoveNext
+Loop
+
+i = 1
+
+For Each item In itemList.Keys
+
+    Sheets("Sheet1").Range("A" & i).Value = itemList(item)("__id")
+    Sheets("Sheet1").Range("B" & i).Value = itemList(item)("__price")
+    Sheets("Sheet1").Range("C" & i).Value = Round(itemList(item)("__stock") + itemList(item)("__stockChg"), 1)
+
+    ' We need itemList(item)("__id") as index, and also itemList(item)("__price") and Round(itemList(item)("__stock") + itemList(item)("__stockChg"), 1)
+            
+    i = i + 1
+Next item
+
+End Sub
